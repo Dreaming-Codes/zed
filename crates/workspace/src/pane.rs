@@ -40,6 +40,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 use theme::ThemeSettings;
 use ui::{
@@ -115,7 +116,8 @@ pub struct CloseActiveItem {
 #[derive(Clone, PartialEq, Debug, Deserialize, JsonSchema, Default, Action)]
 #[action(namespace = pane)]
 #[serde(deny_unknown_fields)]
-pub struct CloseInactiveItems {
+#[action(deprecated_aliases = ["pane::CloseInactiveItems"])]
+pub struct CloseOtherItems {
     #[serde(default)]
     pub save_intent: Option<SaveIntent>,
     #[serde(default)]
@@ -364,6 +366,7 @@ pub struct Pane {
     pinned_tab_count: usize,
     diagnostics: HashMap<ProjectPath, DiagnosticSeverity>,
     zoom_out_on_close: bool,
+    diagnostic_summary_update: Task<()>,
     /// If a certain project item wants to get recreated with specific data, it can persist its data before the recreation here.
     pub project_item_restoration_data: HashMap<ProjectItemKind, Box<dyn Any + Send>>,
 }
@@ -505,6 +508,7 @@ impl Pane {
             pinned_tab_count: 0,
             diagnostics: Default::default(),
             zoom_out_on_close: true,
+            diagnostic_summary_update: Task::ready(()),
             project_item_restoration_data: HashMap::default(),
         }
     }
@@ -616,8 +620,16 @@ impl Pane {
             project::Event::DiskBasedDiagnosticsFinished { .. }
             | project::Event::DiagnosticsUpdated { .. } => {
                 if ItemSettings::get_global(cx).show_diagnostics != ShowDiagnostics::Off {
-                    self.update_diagnostics(cx);
-                    cx.notify();
+                    self.diagnostic_summary_update = cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(30))
+                            .await;
+                        this.update(cx, |this, cx| {
+                            this.update_diagnostics(cx);
+                            cx.notify();
+                        })
+                        .log_err();
+                    });
                 }
             }
             _ => {}
@@ -1343,9 +1355,9 @@ impl Pane {
         })
     }
 
-    pub fn close_inactive_items(
+    pub fn close_other_items(
         &mut self,
-        action: &CloseInactiveItems,
+        action: &CloseOtherItems,
         target_item_id: Option<EntityId>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2567,7 +2579,7 @@ impl Pane {
                         save_intent: None,
                         close_pinned: true,
                     };
-                    let close_inactive_items_action = CloseInactiveItems {
+                    let close_inactive_items_action = CloseOtherItems {
                         save_intent: None,
                         close_pinned: false,
                     };
@@ -2599,7 +2611,7 @@ impl Pane {
                                     .action(Box::new(close_inactive_items_action.clone()))
                                     .disabled(total_items == 1)
                                     .handler(window.handler_for(&pane, move |pane, window, cx| {
-                                        pane.close_inactive_items(
+                                        pane.close_other_items(
                                             &close_inactive_items_action,
                                             Some(item_id),
                                             window,
@@ -3510,8 +3522,8 @@ impl Render for Pane {
                 }),
             )
             .on_action(
-                cx.listener(|pane: &mut Self, action: &CloseInactiveItems, window, cx| {
-                    pane.close_inactive_items(action, None, window, cx)
+                cx.listener(|pane: &mut Self, action: &CloseOtherItems, window, cx| {
+                    pane.close_other_items(action, None, window, cx)
                         .detach_and_log_err(cx);
                 }),
             )
@@ -5842,8 +5854,8 @@ mod tests {
         assert_item_labels(&pane, ["A!", "B!", "C", "D", "E*"], cx);
 
         pane.update_in(cx, |pane, window, cx| {
-            pane.close_inactive_items(
-                &CloseInactiveItems {
+            pane.close_other_items(
+                &CloseOtherItems {
                     save_intent: None,
                     close_pinned: false,
                 },
@@ -5879,8 +5891,8 @@ mod tests {
         assert_item_labels(&pane, ["A", "B", "C", "D", "E*"], cx);
 
         pane.update_in(cx, |pane, window, cx| {
-            pane.close_inactive_items(
-                &CloseInactiveItems {
+            pane.close_other_items(
+                &CloseOtherItems {
                     save_intent: None,
                     close_pinned: false,
                 },
@@ -6245,8 +6257,8 @@ mod tests {
         .unwrap();
 
         pane.update_in(cx, |pane, window, cx| {
-            pane.close_inactive_items(
-                &CloseInactiveItems {
+            pane.close_other_items(
+                &CloseOtherItems {
                     save_intent: None,
                     close_pinned: false,
                 },
